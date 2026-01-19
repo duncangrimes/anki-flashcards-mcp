@@ -11,6 +11,7 @@ Prerequisites:
 """
 
 import httpx
+import fitz  # PyMuPDF
 from mcp.server.fastmcp import FastMCP
 import logging
 
@@ -197,7 +198,7 @@ async def get_model_field_names(model_name: str) -> dict:
     """
     Get the field names for a specific Note Type (model).
     
-    IMPORTANT: Always call this before add_note to know the exact field names
+    IMPORTANT: Always call this before add_notes to know the exact field names
     required. Different models have different fields:
     - "Basic" model: ["Front", "Back"]
     - "Cloze" model: ["Text", "Extra"]
@@ -220,66 +221,125 @@ async def get_model_field_names(model_name: str) -> dict:
 
 
 # =============================================================================
-# Note (Card) Tools
+# PDF Tools
 # =============================================================================
 
 @mcp.tool()
-async def add_note(
-    deck_name: str,
-    model_name: str,
-    fields: dict,
-    tags: list[str] | None = None
-) -> int:
+def get_pdf_table_of_contents(file_path: str) -> dict:
     """
-    Add a new note (flashcard) to Anki.
+    Get the Table of Contents (outline) from a PDF file.
     
-    Before calling this tool:
-    1. Use get_deck_names() to verify the deck exists (or create_deck() to make it)
-    2. Use get_model_names() to find available Note Types
-    3. Use get_model_field_names() to get the exact field names for your chosen model
+    Use this tool FIRST when working with PDFs to understand the document structure
+    and find which pages correspond to specific chapters or sections.
     
     Args:
-        deck_name: The name of the deck to add the note to.
-        model_name: The name of the Note Type (e.g., "Basic", "Cloze").
-        fields: A dictionary mapping field names to content.
-                For "Basic": {"Front": "question", "Back": "answer"}
-                For "Cloze": {"Text": "{{c1::answer}} is hidden", "Extra": "hint"}
-        tags: Optional list of tags for organization (e.g., ["vocabulary", "chapter1"]).
+        file_path: The absolute path to the PDF file.
         
     Returns:
-        The note ID (integer) if successful.
-        
-    Raises:
-        Exception: If the note is a duplicate (duplicates are blocked by default).
+        A dictionary with "toc" (list of entries) and "count".
+        Each entry contains: level (int), title (str), page (int).
         
     Example:
-        >>> add_note(
-        ...     deck_name="French Vocabulary",
-        ...     model_name="Basic",
-        ...     fields={"Front": "Apple", "Back": "Pomme"},
-        ...     tags=["fruit", "food"]
-        ... )
-        1234567890123
-    """
-    note = {
-        "deckName": deck_name,
-        "modelName": model_name,
-        "fields": fields,
-        "tags": tags or [],
-        "options": {
-            "allowDuplicate": False,
-            "duplicateScope": "deck"
+        >>> get_pdf_table_of_contents("/path/to/textbook.pdf")
+        {
+            "toc": [
+                {"level": 1, "title": "Chapter 1: Introduction", "page": 1},
+                {"level": 2, "title": "1.1 Background", "page": 3},
+                ...
+            ],
+            "count": 15
         }
-    }
-    return await invoke_anki("addNote", note=note)
+    """
+    try:
+        doc = fitz.open(file_path)
+        toc = doc.get_toc()
+        doc.close()
+        
+        if not toc:
+            return {
+                "toc": [],
+                "count": 0,
+                "message": "No Table of Contents found in this PDF. Use read_pdf_pages to explore manually."
+            }
+        
+        entries = []
+        for level, title, page in toc:
+            entries.append({"level": level, "title": title, "page": page})
+        
+        return {"toc": entries, "count": len(entries)}
+    except Exception as e:
+        return {"error": f"Error reading PDF: {str(e)}"}
 
+
+@mcp.tool()
+def read_pdf_pages(file_path: str, start_page: int, end_page: int) -> dict:
+    """
+    Extract text content from a range of pages in a PDF file.
+    
+    Use get_pdf_table_of_contents() first to identify which pages to read,
+    then use this tool to extract the text content for flashcard creation.
+    
+    Args:
+        file_path: The absolute path to the PDF file.
+        start_page: The first page to read (1-indexed, inclusive).
+        end_page: The last page to read (1-indexed, inclusive).
+        
+    Returns:
+        A dictionary with "pages" (list of page content), "page_count", and "total_pages".
+        
+    Example:
+        >>> read_pdf_pages("/path/to/textbook.pdf", 10, 12)
+        {
+            "pages": [
+                {"page": 10, "text": "Chapter 5: Photosynthesis..."},
+                {"page": 11, "text": "The process begins when..."},
+                {"page": 12, "text": "In summary, photosynthesis..."}
+            ],
+            "page_count": 3,
+            "total_pages": 200
+        }
+    """
+    try:
+        doc = fitz.open(file_path)
+        total_pages = len(doc)
+        
+        # Validate range (PyMuPDF is 0-indexed, users provide 1-indexed)
+        start_idx = max(0, start_page - 1)
+        end_idx = min(total_pages, end_page)
+        
+        if start_idx >= total_pages:
+            doc.close()
+            return {"error": f"Start page {start_page} exceeds document length ({total_pages} pages)"}
+        
+        pages = []
+        for i in range(start_idx, end_idx):
+            page = doc.load_page(i)
+            text = page.get_text()
+            pages.append({"page": i + 1, "text": text})
+        
+        doc.close()
+        return {
+            "pages": pages,
+            "page_count": len(pages),
+            "total_pages": total_pages
+        }
+    except Exception as e:
+        return {"error": f"Error reading PDF pages: {str(e)}"}
+
+
+# =============================================================================
+# Note (Card) Tools
+# =============================================================================
 
 @mcp.tool()
 async def add_notes(notes: list[dict]) -> dict:
     """
     Add multiple notes (flashcards) to Anki in a single batch.
     
-    This is much more efficient than calling add_note multiple times.
+    Before calling this tool:
+    1. Use get_deck_names() to verify the deck exists (or create_deck() to make it)
+    2. Use get_model_names() to find available Note Types
+    3. Use get_model_field_names() to get the exact field names for your chosen model
     
     Args:
         notes: A list of note dictionaries. Each dictionary should contain:
@@ -364,6 +424,39 @@ async def get_notes_info(note_ids: list[int]) -> dict:
         })
         
     return {"notes": simplified_notes, "count": len(simplified_notes)}
+
+
+@mcp.tool()
+async def delete_notes(note_ids: list[int]) -> dict:
+    """
+    Delete notes from Anki by their IDs.
+    
+    WARNING: This permanently deletes notes and ALL their associated cards.
+    This action cannot be undone unless you have a backup.
+    
+    Typical workflow:
+    1. Use find_notes() to search for notes matching your criteria
+    2. Optionally use get_notes_info() to inspect the notes
+    3. Call delete_notes() with the IDs to delete
+    
+    Args:
+        note_ids: A list of note IDs to delete. Get these from find_notes().
+        
+    Returns:
+        A dictionary with "deleted_count" indicating how many notes were deleted.
+        
+    Example:
+        >>> # Find and delete all notes about mitosis in the Biology deck
+        >>> result = find_notes("deck:Biology mitosis")
+        >>> # result: {"note_ids": [123, 456, 789], "count": 3}
+        >>> delete_notes([123, 456, 789])
+        {"deleted_count": 3}
+    """
+    if not note_ids:
+        return {"deleted_count": 0, "message": "No note IDs provided"}
+    
+    await invoke_anki("deleteNotes", notes=note_ids)
+    return {"deleted_count": len(note_ids)}
 
 
 def main():
