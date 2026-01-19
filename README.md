@@ -15,6 +15,7 @@ An MCP (Model Context Protocol) server that enables LLMs like Claude or Cursor t
 | `add_notes` | Create flashcards in batch |
 | `find_notes` | Search for notes using Anki query syntax |
 | `get_notes_info` | Get detailed content for specific note IDs |
+| `update_notes` | Update note properties (deck, fields, tags) while preserving review history |
 | `delete_notes` | Delete notes by ID (use with `find_notes`) |
 | `get_pdf_table_of_contents` | Extract PDF outline/chapters with page numbers |
 | `read_pdf_pages` | Extract text from specific PDF pages |

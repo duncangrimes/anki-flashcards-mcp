@@ -459,6 +459,140 @@ async def delete_notes(note_ids: list[int]) -> dict:
     return {"deleted_count": len(note_ids)}
 
 
+@mcp.tool()
+async def update_notes(note_ids: list[int], updates: dict) -> dict:
+    """
+    Update existing notes without deleting and recreating them.
+    
+    This preserves:
+    - Note IDs and creation timestamps
+    - Review history and scheduling data
+    - Card statistics and learning progress
+    
+    Supported updates:
+    - deck_name: Move notes to a different deck (preserves review history)
+    - fields: Update field values (e.g., {"Front": "new front", "Back": "new back"})
+    - tags_add: Add tags to notes (list of tag strings)
+    - tags_remove: Remove tags from notes (list of tag strings)
+    
+    Args:
+        note_ids: A list of note IDs to update.
+        updates: A dictionary specifying what to update:
+                 - "deck_name": str - Move cards to this deck
+                 - "fields": dict - Update field values {field_name: new_value}
+                 - "tags_add": list[str] - Tags to add
+                 - "tags_remove": list[str] - Tags to remove
+        
+    Returns:
+        A dictionary with "updated_count", "failed_count", and "operations" summary.
+        
+    Examples:
+        >>> # Move notes to a different deck
+        >>> update_notes([123, 456], {"deck_name": "System Design"})
+        {"updated_count": 2, "failed_count": 0, "operations": ["deck_change"]}
+        
+        >>> # Update field values
+        >>> update_notes([123], {"fields": {"Front": "Updated question", "Back": "Updated answer"}})
+        {"updated_count": 1, "failed_count": 0, "operations": ["fields_update"]}
+        
+        >>> # Add and remove tags
+        >>> update_notes([123, 456], {"tags_add": ["important", "review"], "tags_remove": ["old-tag"]})
+        {"updated_count": 2, "failed_count": 0, "operations": ["tags_add", "tags_remove"]}
+        
+        >>> # Combine multiple operations
+        >>> update_notes([123], {
+        ...     "deck_name": "New Deck",
+        ...     "fields": {"Front": "New front"},
+        ...     "tags_add": ["new-tag"]
+        ... })
+        {"updated_count": 1, "failed_count": 0, "operations": ["deck_change", "fields_update", "tags_add"]}
+    """
+    if not note_ids:
+        return {"updated_count": 0, "failed_count": 0, "message": "No note IDs provided", "operations": []}
+    
+    operations = []
+    errors = []
+    
+    try:
+        # 1. Handle deck change (requires card IDs)
+        if "deck_name" in updates:
+            deck_name = updates["deck_name"]
+            try:
+                # Get note info to extract card IDs
+                notes_info = await invoke_anki("notesInfo", notes=note_ids)
+                card_ids = []
+                for note in notes_info:
+                    card_ids.extend(note.get("cards", []))
+                
+                if card_ids:
+                    await invoke_anki("changeDeck", cards=card_ids, deck=deck_name)
+                    operations.append("deck_change")
+                else:
+                    errors.append("No cards found for the given notes")
+            except Exception as e:
+                errors.append(f"Deck change failed: {str(e)}")
+        
+        # 2. Handle field updates
+        if "fields" in updates:
+            fields = updates["fields"]
+            try:
+                for note_id in note_ids:
+                    await invoke_anki("updateNoteFields", note={"id": note_id, "fields": fields})
+                operations.append("fields_update")
+            except Exception as e:
+                errors.append(f"Fields update failed: {str(e)}")
+        
+        # 3. Handle adding tags
+        if "tags_add" in updates:
+            tags = updates["tags_add"]
+            try:
+                if isinstance(tags, list):
+                    tags_str = " ".join(tags)
+                else:
+                    tags_str = tags
+                await invoke_anki("addTags", notes=note_ids, tags=tags_str)
+                operations.append("tags_add")
+            except Exception as e:
+                errors.append(f"Add tags failed: {str(e)}")
+        
+        # 4. Handle removing tags
+        if "tags_remove" in updates:
+            tags = updates["tags_remove"]
+            try:
+                if isinstance(tags, list):
+                    tags_str = " ".join(tags)
+                else:
+                    tags_str = tags
+                await invoke_anki("removeTags", notes=note_ids, tags=tags_str)
+                operations.append("tags_remove")
+            except Exception as e:
+                errors.append(f"Remove tags failed: {str(e)}")
+        
+        # Determine success/failure
+        if errors:
+            return {
+                "updated_count": len(note_ids) if operations else 0,
+                "failed_count": len(note_ids) if not operations else 0,
+                "operations": operations,
+                "errors": errors,
+                "partial_success": len(operations) > 0 and len(errors) > 0
+            }
+        else:
+            return {
+                "updated_count": len(note_ids),
+                "failed_count": 0,
+                "operations": operations
+            }
+            
+    except Exception as e:
+        return {
+            "updated_count": 0,
+            "failed_count": len(note_ids),
+            "operations": operations,
+            "error": f"Update failed: {str(e)}"
+        }
+
+
 def main():
     """Run the MCP server with stdio transport."""
     mcp.run(transport="stdio")
